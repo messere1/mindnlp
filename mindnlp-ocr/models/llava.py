@@ -37,37 +37,37 @@ class LLaVAModel(VLMModelBase):
     
     def __init__(
         self, 
-        model_name: Optional[str] = None, 
+        model_name_or_path: Optional[str] = None, 
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.float16,
-        low_cpu_mem_usage: bool = True
+        low_cpu_mem_usage: bool = True,
+        **kwargs
     ):
         """
         初始化LLaVA模型
         
         Args:
-            model_name: 模型名称或路径
+            model_name_or_path: 模型名称或路径
             device: 运行设备 (cuda/cpu)
             torch_dtype: 数据类型
             low_cpu_mem_usage: 是否使用低CPU内存模式
         """
-        model_name = model_name or self.DEFAULT_MODEL
-        super().__init__(model_name, device)
+        model_name_or_path = model_name_or_path or self.DEFAULT_MODEL
+        super().__init__(model_name_or_path, device, torch_dtype=torch_dtype, **kwargs)
         
-        self.torch_dtype = torch_dtype
         self.low_cpu_mem_usage = low_cpu_mem_usage
         self.processor = None
         
-        logger.info(f"LLaVA model initialized: {model_name}")
+        logger.info(f"LLaVA model initialized: {model_name_or_path}")
     
     def load_model(self):
         """加载LLaVA模型"""
         try:
-            logger.info(f"Loading LLaVA model from {self.model_name}...")
+            logger.info(f"Loading LLaVA model from {self.model_name_or_path}...")
             
             # 加载模型
             self.model = LlavaForConditionalGeneration.from_pretrained(
-                self.model_name,
+                self.model_name_or_path,
                 torch_dtype=self.torch_dtype,
                 low_cpu_mem_usage=self.low_cpu_mem_usage,
                 device_map=self.device if self.device != "cpu" else None
@@ -87,9 +87,9 @@ class LLaVAModel(VLMModelBase):
     def load_tokenizer(self):
         """加载LLaVA处理器（包含tokenizer和图像处理器）"""
         try:
-            logger.info(f"Loading LLaVA processor from {self.model_name}...")
+            logger.info(f"Loading LLaVA processor from {self.model_name_or_path}...")
             
-            self.processor = AutoProcessor.from_pretrained(self.model_name)
+            self.processor = AutoProcessor.from_pretrained(self.model_name_or_path)
             self.tokenizer = self.processor.tokenizer
             
             logger.info("LLaVA processor loaded successfully")
@@ -97,6 +97,43 @@ class LLaVAModel(VLMModelBase):
         except Exception as e:
             logger.error(f"Failed to load LLaVA processor: {e}")
             raise
+    
+    def load_processor(self):
+        """加载处理器（与load_tokenizer相同）"""
+        self.load_tokenizer()
+    
+    def decode(self, token_ids: torch.Tensor, skip_special_tokens: bool = True) -> str:
+        """
+        解码token IDs为文本
+        
+        Args:
+            token_ids: Token IDs
+            skip_special_tokens: 是否跳过特殊token
+            
+        Returns:
+            str: 解码后的文本
+        """
+        if self.processor is None:
+            self.load_tokenizer()
+        
+        return self.processor.decode(token_ids, skip_special_tokens=skip_special_tokens)
+    
+    def prepare_inputs(
+        self, 
+        image: Image.Image, 
+        prompt: str
+    ) -> Dict[str, Any]:
+        """
+        准备模型输入
+        
+        Args:
+            image: PIL图像
+            prompt: 文本提示
+            
+        Returns:
+            Dict: 模型输入字典
+        """
+        return self.preprocess(image, prompt)
     
     def preprocess(
         self, 
@@ -235,7 +272,7 @@ class LLaVAModel(VLMModelBase):
             Dict: 模型信息
         """
         return {
-            "model_name": self.model_name,
+            "model_name": self.model_name_or_path,
             "model_type": "LLaVA",
             "device": self.device,
             "torch_dtype": str(self.torch_dtype),
@@ -250,4 +287,4 @@ class LLaVAModel(VLMModelBase):
         }
     
     def __repr__(self) -> str:
-        return f"LLaVAModel(model_name={self.model_name}, device={self.device})"
+        return f"LLaVAModel(model_name={self.model_name_or_path}, device={self.device})"

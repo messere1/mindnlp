@@ -7,6 +7,7 @@ import pytest
 import torch
 from PIL import Image
 import numpy as np
+from unittest.mock import Mock, patch, MagicMock
 from models.llava import LLaVAModel
 from models.loader import ModelFactory, MultiModelLoader
 from config.settings import get_settings
@@ -31,8 +32,8 @@ class TestLLaVAModel:
         """测试模型初始化"""
         assert model is not None
         assert model.device == "cpu"
-        assert model.model_name in LLaVAModel.SUPPORTED_MODELS or \
-               model.model_name == LLaVAModel.DEFAULT_MODEL
+        assert model.model_name_or_path in LLaVAModel.SUPPORTED_MODELS or \
+               model.model_name_or_path == LLaVAModel.DEFAULT_MODEL
     
     def test_model_info(self, model):
         """测试模型信息获取"""
@@ -87,15 +88,50 @@ class TestModelFactory:
         assert "internvl" in models
         assert "llava" in models
     
-    def test_create_qwen2vl(self):
-        """测试创建Qwen2-VL模型"""
+    @pytest.mark.slow
+    def test_create_qwen2vl_real(self):
+        """测试创建Qwen2-VL模型（真实加载，标记为慢速）"""
         model = ModelFactory.create_model("qwen2-vl", device="cpu")
         
         assert model is not None
         assert model.device == "cpu"
     
-    def test_create_internvl(self):
-        """测试创建InternVL模型"""
+    @patch('models.qwen2vl.Qwen2VLModel.load_model')
+    @patch('models.qwen2vl.Qwen2VLModel.load_processor')
+    @patch('models.qwen2vl.Qwen2VLModel.load_tokenizer')
+    def test_create_qwen2vl(self, mock_tokenizer, mock_processor, mock_model):
+        """测试创建Qwen2-VL模型（使用mock）"""
+        # Mock 模型加载方法
+        mock_model.return_value = None
+        mock_processor.return_value = None
+        mock_tokenizer.return_value = None
+        
+        model = ModelFactory.create_model("qwen2-vl", device="cpu")
+        
+        assert model is not None
+        assert model.device == "cpu"
+        # 验证加载方法被调用
+        mock_model.assert_called_once()
+        mock_processor.assert_called_once()
+        mock_tokenizer.assert_called_once()
+    
+    @pytest.mark.slow
+    def test_create_internvl_real(self):
+        """测试创建InternVL模型（真实加载，标记为慢速）"""
+        model = ModelFactory.create_model("internvl", device="cpu")
+        
+        assert model is not None
+        assert model.device == "cpu"
+    
+    @patch('models.internvl.InternVLModel.load_model')
+    @patch('models.internvl.InternVLModel.load_processor')
+    @patch('models.internvl.InternVLModel.load_tokenizer')
+    def test_create_internvl(self, mock_tokenizer, mock_processor, mock_model):
+        """测试创建InternVL模型（使用mock）"""
+        mock_model.return_value = None
+        mock_processor.return_value = None
+        mock_tokenizer.return_value = None
+        
         model = ModelFactory.create_model("internvl", device="cpu")
         
         assert model is not None
@@ -109,13 +145,20 @@ class TestModelFactory:
         assert model.device == "cpu"
         assert isinstance(model, LLaVAModel)
     
-    def test_create_with_alias(self):
-        """测试使用别名创建模型"""
+    @patch('models.qwen2vl.Qwen2VLModel.load_model')
+    @patch('models.qwen2vl.Qwen2VLModel.load_processor')
+    @patch('models.qwen2vl.Qwen2VLModel.load_tokenizer')
+    def test_create_with_alias(self, mock_tokenizer, mock_processor, mock_model):
+        """测试使用别名创建模型（使用mock）"""
+        mock_model.return_value = None
+        mock_processor.return_value = None
+        mock_tokenizer.return_value = None
+        
         # 测试qwen别名
         model1 = ModelFactory.create_model("qwen", device="cpu")
         assert model1 is not None
         
-        # 测试llava-1.5别名
+        # 测试llava-1.5别名（不需要mock，LLaVA不立即加载）
         model2 = ModelFactory.create_model("llava-1.5", device="cpu")
         assert model2 is not None
         assert isinstance(model2, LLaVAModel)
