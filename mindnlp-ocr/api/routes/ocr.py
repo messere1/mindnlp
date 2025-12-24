@@ -46,7 +46,8 @@ async def predict_image(
     output_format: str = Form("text"),
     language: str = Form("auto"),
     task_type: str = Form("general"),
-    confidence_threshold: float = Form(0.0)
+    confidence_threshold: float = Form(0.0),
+    model: str = Form(None)  # 新增：模型选择参数
 ):
     """
     单张图像OCR预测
@@ -57,6 +58,7 @@ async def predict_image(
         language: 语言设置 (auto/zh/en/ja/ko)
         task_type: 任务类型 (general/document/table/formula)
         confidence_threshold: 置信度阈值
+        model: 模型类型 (qwen2-vl/internvl/llava，可选)
     
     Returns:
         OCRResponse: OCR识别结果
@@ -64,6 +66,16 @@ async def predict_image(
     start_time = time.time()
     
     try:
+        # 验证模型类型
+        if model and model not in settings.available_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的模型: {model}。可用模型: {list(settings.available_models.keys())}"
+            )
+        
+        # 使用指定模型或默认模型
+        model_type = model or settings.default_model
+        
         # 验证文件类型
         if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image/webp", "image/bmp"]:
             raise HTTPException(
@@ -72,7 +84,7 @@ async def predict_image(
             )
         
         # 获取引擎
-        engine = get_engine()
+        engine = get_engine(model_type)  # 传入模型类型
         
         # 读取图像数据
         image_bytes = await file.read()
@@ -386,3 +398,169 @@ async def get_batch_queue_metrics():
     except Exception as e:
         logger.error(f"Failed to get metrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models")
+async def list_models():
+    """
+    列出所有可用的模型
+    
+    Returns:
+        dict: 模型列表和详细信息
+    """
+    try:
+        models_info = []
+        
+        for model_type, model_path in settings.available_models.items():
+            model_info = {
+                "type": model_type,
+                "model_id": model_path,
+                "description": settings.model_descriptions.get(model_type, ""),
+                "capabilities": settings.model_capabilities.get(model_type, []),
+                "is_default": model_type == settings.default_model
+            }
+            models_info.append(model_info)
+        
+        return {
+            "success": True,
+            "default_model": settings.default_model,
+            "total_models": len(models_info),
+            "models": models_info,
+            "multi_model_enabled": settings.enable_multi_model
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to list models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models/{model_type}")
+async def get_model_info(model_type: str):
+    """
+    获取特定模型的详细信息
+    
+    Args:
+        model_type: 模型类型
+        
+    Returns:
+        dict: 模型详细信息
+    """
+    try:
+        if model_type not in settings.available_models:
+            raise HTTPException(
+                status_code=404,
+                detail=f"模型不存在: {model_type}"
+            )
+        
+        # 导入ModelFactory获取更多信息
+        from models.loader import ModelFactory
+        factory_info = ModelFactory.get_model_info(model_type)
+        
+        model_info = {
+            "type": model_type,
+            "model_id": settings.available_models[model_type],
+            "description": settings.model_descriptions.get(model_type, ""),
+            "capabilities": settings.model_capabilities.get(model_type, []),
+            "is_default": model_type == settings.default_model,
+            **factory_info
+        }
+        
+        return {
+            "success": True,
+            "model": model_info
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get model info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/models/compare")
+async def compare_models(
+    file: UploadFile = File(...),
+    prompt: str = Form("识别图中的文字"),
+    models: List[str] = Form(None)
+):
+    """
+    使用多个模型对比识别同一图像
+    
+    Args:
+        file: 上传的图像文件
+        prompt: OCR提示词
+        models: 要对比的模型列表（不提供则使用所有可用模型）
+        
+    Returns:
+        dict: 各模型的识别结果对比
+    """
+    start_time = time.time()
+    
+    try:
+        # 验证文件类型
+        if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image/webp", "image/bmp"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type: {file.content_type}"
+            )
+        
+        # 确定要对比的模型
+        if models is None or len(models) == 0:
+            models = list(settings.available_models.keys())
+        else:
+            # 验证模型
+            invalid_models = [m for m in models if m not in settings.available_models]
+            if invalid_models:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"不支持的模型: {invalid_models}"
+                )
+        
+        # 读取图像
+        image_bytes = await file.read()
+        
+        # 对每个模型进行推理
+        results = {}
+        for model_type in models:
+            model_start = time.time()
+            
+            try:
+                # 获取该模型的引擎
+                engine = get_engine(model_type)
+                
+                # 执行OCR（这里是模拟）
+                result = f"[{model_type}] 识别结果（模拟）"
+                
+                model_time = time.time() - model_start
+                
+                results[model_type] = {
+                    "success": True,
+                    "result": result,
+                    "inference_time": model_time,
+                    "model_path": settings.available_models[model_type]
+                }
+                
+            except Exception as e:
+                logger.error(f"Model {model_type} failed: {e}")
+                results[model_type] = {
+                    "success": False,
+                    "error": str(e),
+                    "model_path": settings.available_models[model_type]
+                }
+        
+        total_time = time.time() - start_time
+        
+        return {
+            "success": True,
+            "prompt": prompt,
+            "models_tested": len(models),
+            "results": results,
+            "total_time": total_time
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Model comparison failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
