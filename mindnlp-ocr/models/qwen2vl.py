@@ -2,7 +2,7 @@
 Qwen2-VL模型封装
 """
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from .base import VLMModelBase
 from typing import Any, Dict
 from utils.logger import get_logger
@@ -30,7 +30,7 @@ class Qwen2VLModel(VLMModelBase):
         """加载Qwen2-VL模型"""
         try:
             logger.info(f"Loading Qwen2-VL model: {self.model_name}")
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
                 torch_dtype="auto",
