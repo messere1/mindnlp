@@ -1,10 +1,12 @@
 """
 OCR预测路由
+支持同步和异步批处理
 """
 
 import time
-from typing import List
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Depends
+import uuid
+from typing import List, Optional
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Depends, BackgroundTasks
 from ..schemas.request import OCRRequest, OCRBatchRequest, OCRURLRequest
 from ..schemas.response import OCRResponse, BatchOCRResponse
 from utils.logger import get_logger
@@ -14,6 +16,22 @@ from config.settings import get_settings
 logger = get_logger(__name__)
 settings = get_settings()
 router = APIRouter()
+
+# 全局批处理队列（将在app.py中初始化）
+_batch_queue = None
+
+
+def set_batch_queue(queue):
+    """设置批处理队列"""
+    global _batch_queue
+    _batch_queue = queue
+
+
+def get_batch_queue():
+    """获取批处理队列"""
+    if _batch_queue is None:
+        raise RuntimeError("Batch queue not initialized")
+    return _batch_queue
 
 
 def get_engine():
@@ -230,3 +248,141 @@ async def predict_from_url(request: OCRURLRequest):
     except Exception as e:
         logger.error(f"URL OCR prediction failed: {e}")
         raise HTTPException(status_code=500, detail=f"URL OCR prediction failed: {str(e)}")
+
+
+@router.post("/predict_batch_async", response_model=BatchOCRResponse)
+async def predict_batch_async(
+    files: List[UploadFile] = File(...),
+    output_format: str = Form("text"),
+    language: str = Form("auto"),
+    task_type: str = Form("general"),
+    confidence_threshold: float = Form(0.0),
+    timeout: Optional[float] = Form(30.0)
+):
+    """
+    异步批量图像OCR预测（使用批处理队列）
+    
+    特性:
+    - 自动批处理聚合
+    - 智能等待策略
+    - 更高的吞吐量
+    
+    Args:
+        files: 上传的图像文件列表
+        output_format: 输出格式 (text/json/markdown)
+        language: 语言设置 (auto/zh/en/ja/ko)
+        task_type: 任务类型 (general/document/table/formula)
+        confidence_threshold: 置信度阈值
+        timeout: 请求超时时间（秒）
+    
+    Returns:
+        BatchOCRResponse: OCR识别结果列表
+    """
+    start_time = time.time()
+    
+    try:
+        # 获取批处理队列
+        batch_queue = get_batch_queue()
+        
+        # 读取所有图像
+        images_data = []
+        for file in files:
+            if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image/webp", "image/bmp"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid file type: {file.content_type}"
+                )
+            
+            image_bytes = await file.read()
+            images_data.append({
+                'image': image_bytes,
+                'filename': file.filename
+            })
+        
+        # 为每个图像创建请求并提交到队列
+        import asyncio
+        futures = []
+        for idx, img_data in enumerate(images_data):
+            request_id = f"{uuid.uuid4()}-{idx}"
+            
+            # 构建OCR请求数据
+            request_data = {
+                'image': img_data['image'],
+                'output_format': output_format,
+                'language': language,
+                'task_type': task_type,
+                'confidence_threshold': confidence_threshold,
+                'filename': img_data['filename']
+            }
+            
+            # 提交到队列
+            future = batch_queue.add_request(
+                request_id=request_id,
+                data=request_data,
+                timeout=timeout
+            )
+            futures.append(future)
+        
+        # 等待所有结果
+        results = await asyncio.gather(*futures, return_exceptions=True)
+        
+        # 处理结果
+        ocr_results = []
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Request {idx} failed: {result}")
+                # 创建失败响应
+                ocr_results.append(OCRResponse(
+                    success=False,
+                    texts=[],
+                    boxes=[],
+                    confidences=[],
+                    raw_output="",
+                    inference_time=0.0,
+                    model_name=settings.default_model,
+                    metadata={"error": str(result)}
+                ))
+            else:
+                ocr_results.append(result)
+        
+        total_time = time.time() - start_time
+        
+        return BatchOCRResponse(
+            success=True,
+            results=ocr_results,
+            total_images=len(files),
+            total_time=total_time,
+            model_name=settings.default_model
+        )
+        
+    except RuntimeError as e:
+        logger.error(f"Batch queue not available: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Async batch OCR failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Async batch OCR failed: {str(e)}")
+
+
+@router.get("/batch_queue/metrics")
+async def get_batch_queue_metrics():
+    """
+    获取批处理队列指标
+    
+    Returns:
+        dict: 队列指标信息
+    """
+    try:
+        batch_queue = get_batch_queue()
+        metrics = batch_queue.get_metrics()
+        
+        return {
+            "success": True,
+            "metrics": metrics
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
