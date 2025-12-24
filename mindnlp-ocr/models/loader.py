@@ -1,11 +1,14 @@
 """
 模型加载器
-根据模型名称加载对应的VLM模型
+统一的模型加载入口，支持多种VLM模型
 支持多模型管理和动态切换
 """
 
+import os
 import torch
 from typing import Dict, Optional, List, Union
+from pathlib import Path
+
 from .base import VLMModelBase
 from .qwen2vl import Qwen2VLModel
 from .internvl import InternVLModel
@@ -17,7 +20,14 @@ logger = get_logger(__name__)
 
 
 class ModelLoader:
-    """模型加载器"""
+    """
+    模型加载器
+    
+    提供统一的模型加载接口，支持：
+    - HuggingFace模型ID（如 "Qwen/Qwen2-VL-7B-Instruct"）
+    - 本地模型路径
+    - 多种VLM模型类型
+    """
     
     # 支持的模型映射
     MODEL_MAPPING = {
@@ -30,75 +40,288 @@ class ModelLoader:
         'llava-1.6': LLaVAModel,
     }
     
-    def __init__(self, model_name: str, device: str = "cuda"):
+    # 默认模型
+    DEFAULT_MODEL = 'Qwen/Qwen2-VL-7B-Instruct'
+    
+    def __init__(
+        self,
+        model_name_or_path: Optional[str] = None,
+        model_type: Optional[str] = None,
+        device: str = "cuda",
+        torch_dtype: torch.dtype = torch.float16,
+        trust_remote_code: bool = True
+    ):
         """
         初始化模型加载器
         
         Args:
-            model_name: 模型名称或HuggingFace model ID
-            device: 运行设备
+            model_name_or_path: 模型名称或路径
+                - HuggingFace ID: "Qwen/Qwen2-VL-7B-Instruct"
+                - 本地路径: "/path/to/model"
+                - None: 使用默认模型
+            model_type: 模型类型（'qwen2-vl', 'internvl'等）
+                - None: 自动检测
+            device: 运行设备 ('cuda', 'cpu', 'auto')
+            torch_dtype: 模型精度（默认 float16）
+            trust_remote_code: 是否信任远程代码
         """
-        self.model_name = model_name
-        self.device = device
-        self.model_instance = None
-        logger.info(f"ModelLoader initialized with model: {model_name}")
+        self.model_name_or_path = model_name_or_path or self.DEFAULT_MODEL
+        self.model_type = model_type
+        self.device = self._setup_device(device)
+        self.torch_dtype = torch_dtype
+        self.trust_remote_code = trust_remote_code
+        
+        self.model_instance: Optional[VLMModelBase] = None
+        
+        logger.info(f"ModelLoader initialized")
+        logger.info(f"  Model: {self.model_name_or_path}")
+        logger.info(f"  Device: {self.device}")
+        logger.info(f"  Dtype: {self.torch_dtype}")
     
-    def load_model(self) -> VLMModelBase:
+    def _setup_device(self, device: str) -> str:
+        """
+        设置运行设备
+        
+        Args:
+            device: 设备字符串 ('cuda', 'cpu', 'auto')
+            
+        Returns:
+            str: 实际使用的设备
+        """
+        if device == 'auto':
+            if torch.cuda.is_available():
+                device = 'cuda'
+                logger.info(f"Auto-detected CUDA, using GPU")
+            else:
+                device = 'cpu'
+                logger.warning("CUDA not available, using CPU")
+        elif device == 'cuda' and not torch.cuda.is_available():
+            logger.warning("CUDA not available, falling back to CPU")
+            device = 'cpu'
+        
+        return device
+    
+    def _detect_model_type(self, model_name_or_path: str) -> str:
+        """
+        自动检测模型类型
+        
+        Args:
+            model_name_or_path: 模型名称或路径
+            
+        Returns:
+            str: 检测到的模型类型
+        """
+        name_lower = model_name_or_path.lower()
+        
+        # 检查是否包含关键词
+        if 'qwen2-vl' in name_lower or 'qwen2vl' in name_lower:
+            return 'qwen2-vl'
+        elif 'qwen' in name_lower:
+            return 'qwen2-vl'  # 默认使用 Qwen2-VL
+        elif 'internvl' in name_lower:
+            return 'internvl'
+        elif 'llava' in name_lower:
+            return 'llava'
+        else:
+            logger.warning(
+                f"Cannot detect model type from '{model_name_or_path}', "
+                f"using 'qwen2-vl' as default"
+            )
+            return 'qwen2-vl'
+    
+    def _get_model_class(self, model_type: str) -> type:
+        """
+        获取模型类
+        
+        Args:
+            model_type: 模型类型
+            
+        Returns:
+            type: 模型类
+            
+        Raises:
+            ValueError: 不支持的模型类型
+        """
+        model_class = self.MODEL_MAPPING.get(model_type)
+        
+        if model_class is None:
+            supported = ', '.join(self.MODEL_MAPPING.keys())
+            raise ValueError(
+                f"Unsupported model type: '{model_type}'. "
+                f"Supported types: {supported}"
+            )
+        
+        return model_class
+    
+    def _validate_model_path(self, path: str) -> bool:
+        """
+        验证本地模型路径是否有效
+        
+        Args:
+            path: 模型路径
+            
+        Returns:
+            bool: 路径是否有效
+        """
+        if not os.path.exists(path):
+            return False
+        
+        # 检查必要的文件
+        required_files = ['config.json']  # 至少需要 config.json
+        
+        for file in required_files:
+            if not os.path.exists(os.path.join(path, file)):
+                return False
+        
+        return True
+    
+    def load(self) -> VLMModelBase:
         """
         加载模型
         
         Returns:
             VLMModelBase: 加载的模型实例
+            
+        Raises:
+            RuntimeError: 模型加载失败
+            ValueError: 无效的模型配置
         """
-        # 检测模型类型
-        model_type = self._detect_model_type(self.model_name)
-        
-        # 获取对应的模型类
-        model_class = self.MODEL_MAPPING.get(model_type)
-        
-        if model_class is None:
-            logger.warning(f"Unknown model type: {model_type}, using Qwen2VL as default")
-            model_class = Qwen2VLModel
-        
-        # 实例化并加载模型
-        logger.info(f"Loading model with {model_class.__name__}")
-        self.model_instance = model_class(self.model_name, self.device)
-        
-        return self.model_instance.model
+        try:
+            # 检查是否是本地路径
+            is_local = os.path.exists(self.model_name_or_path)
+            
+            if is_local:
+                logger.info(f"Loading model from local path: {self.model_name_or_path}")
+                if not self._validate_model_path(self.model_name_or_path):
+                    raise ValueError(
+                        f"Invalid model path: {self.model_name_or_path}. "
+                        "Required files (config.json) not found."
+                    )
+            else:
+                logger.info(f"Loading model from HuggingFace: {self.model_name_or_path}")
+            
+            # 检测或使用指定的模型类型
+            model_type = self.model_type or self._detect_model_type(self.model_name_or_path)
+            logger.info(f"Detected model type: {model_type}")
+            
+            # 获取模型类
+            model_class = self._get_model_class(model_type)
+            logger.info(f"Using model class: {model_class.__name__}")
+            
+            # 实例化模型
+            self.model_instance = model_class(
+                model_name_or_path=self.model_name_or_path,
+                device=self.device,
+                torch_dtype=self.torch_dtype,
+                trust_remote_code=self.trust_remote_code
+            )
+            
+            logger.info("✓ Model loaded successfully")
+            return self.model_instance
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to load model: {e}")
+            raise RuntimeError(f"Model loading failed: {e}")
     
-    def load_tokenizer(self):
+    def get_model(self) -> Optional[VLMModelBase]:
         """
-        加载tokenizer
+        获取已加载的模型实例
         
         Returns:
-            Tokenizer实例
+            Optional[VLMModelBase]: 模型实例，如果未加载则返回 None
         """
         if self.model_instance is None:
-            self.load_model()
+            logger.warning("Model not loaded yet. Call load() first.")
         
-        return self.model_instance.tokenizer
+        return self.model_instance
     
-    def _detect_model_type(self, model_name: str) -> str:
+    def get_model_info(self) -> Dict:
         """
-        检测模型类型
+        获取模型信息
+        
+        Returns:
+            Dict: 模型信息字典
+        """
+        if self.model_instance is None:
+            return {
+                'status': 'not_loaded',
+                'config': {
+                    'model_name_or_path': self.model_name_or_path,
+                    'device': self.device,
+                    'dtype': str(self.torch_dtype)
+                }
+            }
+        
+        info = self.model_instance.get_model_info()
+        info['status'] = 'loaded'
+        return info
+    
+    @classmethod
+    def list_supported_models(cls) -> Dict[str, type]:
+        """
+        列出所有支持的模型类型
+        
+        Returns:
+            Dict[str, type]: 模型类型映射
+        """
+        return cls.MODEL_MAPPING.copy()
+    
+    @classmethod
+    def is_model_supported(cls, model_type: str) -> bool:
+        """
+        检查模型类型是否支持
         
         Args:
-            model_name: 模型名称
+            model_type: 模型类型
             
         Returns:
-            str: 模型类型
+            bool: 是否支持
         """
-        model_name_lower = model_name.lower()
+        return model_type.lower() in cls.MODEL_MAPPING
+    
+    def __repr__(self) -> str:
+        status = "loaded" if self.model_instance else "not loaded"
+        return (
+            f"ModelLoader("
+            f"model='{self.model_name_or_path}', "
+            f"type='{self.model_type}', "
+            f"device='{self.device}', "
+            f"status='{status}')"
+        )
+
+
+def load_model(
+    model_name_or_path: Optional[str] = None,
+    model_type: Optional[str] = None,
+    device: str = "cuda",
+    torch_dtype: torch.dtype = torch.float16,
+    **kwargs
+) -> VLMModelBase:
+    """
+    快捷函数：加载模型
+    
+    Args:
+        model_name_or_path: 模型名称或路径
+        model_type: 模型类型
+        device: 运行设备
+        torch_dtype: 模型精度
+        **kwargs: 其他参数
         
-        if 'qwen' in model_name_lower:
-            return 'qwen2-vl'
-        elif 'internvl' in model_name_lower:
-            return 'internvl'
-        elif 'llava' in model_name_lower:
-            return 'llava'
-        else:
-            logger.warning(f"Cannot detect model type from name: {model_name}")
-            return 'qwen2-vl'  # 默认使用Qwen2-VL
+    Returns:
+        VLMModelBase: 加载的模型实例
+        
+    Example:
+        >>> model = load_model("Qwen/Qwen2-VL-7B-Instruct")
+        >>> result = model.ocr(image, "识别图像中的文字")
+    """
+    loader = ModelLoader(
+        model_name_or_path=model_name_or_path,
+        model_type=model_type,
+        device=device,
+        torch_dtype=torch_dtype,
+        **kwargs
+    )
+    return loader.load()
 
 
 class ModelFactory:
@@ -257,10 +480,6 @@ class MultiModelLoader:
             **kwargs
         )
         
-        # 加载模型权重
-        model.load_model()
-        model.load_tokenizer()
-        
         # 保存到模型字典
         self.models[model_name] = model
         
@@ -386,4 +605,3 @@ class MultiModelLoader:
             f"loaded={len(self.models)}, "
             f"active='{self.active_model}')"
         )
-

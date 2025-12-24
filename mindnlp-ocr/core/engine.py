@@ -44,6 +44,10 @@ class VLMOCREngine:
         """
         logger.info(f"Initializing VLM-OCR Engine with model: {model_name}")
         
+        # 保存配置
+        self.model_name = model_name
+        self.device = device
+        
         # 加载模型
         self.model_loader = ModelLoader(model_name, device)
         self.model = self.model_loader.load_model()
@@ -98,7 +102,7 @@ class VLMOCREngine:
             
             # 3. 构建Prompt
             logger.info(f"Building prompt for task: {request.task_type}")
-            prompt = self.prompt_builder.build_prompt(
+            prompt = self.prompt_builder.build(
                 task_type=request.task_type,
                 output_format=request.output_format,
                 language=request.language,
@@ -132,11 +136,17 @@ class VLMOCREngine:
             processing_time = time.time() - start_time
             return OCRResponse(
                 success=True,
-                text=formatted_result.get('text', ''),
-                blocks=formatted_result.get('blocks'),
-                format=request.output_format,
-                language=request.language,
-                processing_time=processing_time
+                texts=formatted_result.get('texts', []),
+                boxes=formatted_result.get('boxes', []),
+                confidences=formatted_result.get('confidences', []),
+                raw_output=decoded_text,
+                inference_time=processing_time,
+                model_name=self.model_name,
+                metadata={
+                    'format': request.output_format,
+                    'language': request.language,
+                    'task_type': request.task_type
+                }
             )
             
         except Exception as e:
@@ -144,11 +154,17 @@ class VLMOCREngine:
             processing_time = time.time() - start_time
             return OCRResponse(
                 success=False,
-                text="",
-                format=request.output_format,
-                language=request.language,
-                processing_time=processing_time,
-                error_message=str(e)
+                texts=[],
+                boxes=[],
+                confidences=[],
+                raw_output="",
+                inference_time=processing_time,
+                model_name=self.model_name,
+                metadata={
+                    'format': request.output_format,
+                    'language': request.language
+                },
+                error=str(e)
             )
     
     def predict_batch(self, request: OCRBatchRequest) -> List[OCRResponse]:

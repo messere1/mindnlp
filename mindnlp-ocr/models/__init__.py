@@ -4,7 +4,12 @@
 """
 
 from .base import VLMModelBase
-from .loader import ModelLoader
+from .loader import ModelLoader, load_model
 from .qwen2vl import Qwen2VLModel
 
-__all__ = ['VLMModelBase', 'ModelLoader', 'Qwen2VLModel']
+__all__ = [
+    'VLMModelBase',
+    'ModelLoader',
+    'Qwen2VLModel',
+    'load_model',  # 快捷加载函数
+]
